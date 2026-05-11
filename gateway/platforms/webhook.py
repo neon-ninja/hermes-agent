@@ -637,8 +637,12 @@ class WebhookAdapter(BasePlatformAdapter):
             return None
 
         repository = payload.get("repository", {})
+        if not isinstance(repository, dict):
+            repository = {}
         repo = str(repository.get("full_name", "")).strip()
         issue = payload.get("issue", {})
+        if not isinstance(issue, dict):
+            issue = {}
         issue_number_raw = issue.get("number")
         if issue_number_raw is None:
             issue_number_raw = payload.get("number", "")
@@ -648,16 +652,26 @@ class WebhookAdapter(BasePlatformAdapter):
                 "[webhook] github_author_association middleware missing repo/issue for route=%s",
                 route_name,
             )
-            return None
+            return web.json_response(
+                {
+                    "status": "ignored",
+                    "route": route_name,
+                    "event": event_type,
+                    "delivery_id": delivery_id,
+                    "reason": "github_author_association_context_missing",
+                },
+                status=200,
+            )
 
         actor: dict = {}
         association = ""
         comment_id = ""
         if event_type == "issue_comment":
             comment = payload.get("comment", {})
-            actor = comment.get("user", {}) if isinstance(comment, dict) else {}
-            association = str(comment.get("author_association", "")).strip()
-            comment_id = str(comment.get("id", "")).strip()
+            if isinstance(comment, dict):
+                actor = comment.get("user", {})
+                association = str(comment.get("author_association", "")).strip()
+                comment_id = str(comment.get("id", "")).strip()
         elif event_type == "issues":
             actor = issue.get("user", {}) if isinstance(issue, dict) else {}
             association = str(issue.get("author_association", "")).strip()
@@ -692,7 +706,13 @@ class WebhookAdapter(BasePlatformAdapter):
 
         if normalized_association not in allowed:
             allowed_label = ", ".join(sorted(allowed))
-            denied_message = middleware.get("denied_message", "").strip()
+            denied_message_raw = middleware.get("denied_message", "")
+            if denied_message_raw is None:
+                denied_message = ""
+            elif isinstance(denied_message_raw, str):
+                denied_message = denied_message_raw.strip()
+            else:
+                denied_message = str(denied_message_raw).strip()
             if denied_message:
                 denied_message = self._render_prompt(
                     denied_message, payload, event_type, route_name
@@ -703,7 +723,9 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"author_association values: {allowed_label}."
                 )
 
-            self._post_github_issue_comment(repo, issue_number, denied_message)
+            self._schedule_github_middleware_side_effect(
+                self._post_github_issue_comment, repo, issue_number, denied_message
+            )
             logger.info(
                 "[webhook] denied route=%s event=%s association=%s delivery=%s",
                 route_name,
@@ -723,8 +745,16 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=200,
             )
 
-        self._add_github_eyes_reaction(repo, issue_number, comment_id)
+        self._schedule_github_middleware_side_effect(
+            self._add_github_eyes_reaction, repo, issue_number, comment_id
+        )
         return None
+
+    def _schedule_github_middleware_side_effect(self, fn, *args) -> None:
+        """Run GitHub middleware side effects in the background."""
+        task = asyncio.create_task(asyncio.to_thread(fn, *args))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     # ------------------------------------------------------------------
     # Signature validation
