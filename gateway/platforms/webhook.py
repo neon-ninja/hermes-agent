@@ -58,6 +58,11 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+_DEFAULT_GITHUB_ALLOWED_AUTHOR_ASSOCIATIONS = (
+    "OWNER",
+    "MEMBER",
+    "COLLABORATOR",
+)
 
 # Hostnames/IP literals that only serve connections originating on the same
 # machine. Anything else is treated as a public bind for safety-rail purposes.
@@ -524,6 +529,16 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=502,
             )
 
+        middleware_response = await self._run_github_author_association_middleware(
+            route_config=route_config,
+            route_name=route_name,
+            event_type=event_type,
+            payload=payload,
+            delivery_id=delivery_id,
+        )
+        if middleware_response is not None:
+            return middleware_response
+
         # Use delivery_id in session key so concurrent webhooks on the
         # same route get independent agent runs (not queued/interrupted).
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
@@ -581,6 +596,122 @@ class WebhookAdapter(BasePlatformAdapter):
             },
             status=202,
         )
+
+    async def _run_github_author_association_middleware(
+        self,
+        route_config: dict,
+        route_name: str,
+        event_type: str,
+        payload: dict,
+        delivery_id: str,
+    ) -> Optional["web.Response"]:
+        """Optionally gate GitHub LLM runs by ``author_association``.
+
+        Args:
+            route_config: Route-level webhook configuration.
+            route_name: Route name used for logging.
+            event_type: Normalized webhook event type.
+            payload: Parsed webhook JSON payload.
+            delivery_id: Webhook delivery identifier.
+
+        Returns:
+            None to continue normal webhook handling, or a ``web.Response`` to
+            short-circuit processing (for denied requests).
+        """
+        middleware = route_config.get("github_author_association", None)
+        if middleware is None or middleware is False:
+            return None
+
+        if middleware is True:
+            middleware = {}
+        if not isinstance(middleware, dict):
+            logger.warning(
+                "[webhook] route=%s has invalid github_author_association config; expected bool/dict",
+                route_name,
+            )
+            return None
+        if middleware.get("enabled", True) is False:
+            return None
+
+        if event_type not in {"issues", "issue_comment"}:
+            return None
+
+        repository = payload.get("repository", {})
+        repo = str(repository.get("full_name", "")).strip()
+        issue = payload.get("issue", {})
+        issue_number = str(issue.get("number", "")).strip()
+        if not repo or not issue_number:
+            logger.warning(
+                "[webhook] github_author_association middleware missing repo/issue for route=%s",
+                route_name,
+            )
+            return None
+
+        actor: dict = {}
+        association = ""
+        comment_id = ""
+        if event_type == "issue_comment":
+            comment = payload.get("comment", {})
+            actor = comment.get("user", {}) if isinstance(comment, dict) else {}
+            association = str(comment.get("author_association", "")).strip()
+            comment_id = str(comment.get("id", "")).strip()
+        elif event_type == "issues":
+            actor = issue.get("user", {}) if isinstance(issue, dict) else {}
+            association = str(issue.get("author_association", "")).strip()
+
+        allowed_raw = middleware.get(
+            "allowed", list(_DEFAULT_GITHUB_ALLOWED_AUTHOR_ASSOCIATIONS)
+        )
+        if not isinstance(allowed_raw, list):
+            logger.warning(
+                "[webhook] github_author_association.allowed for route=%s must be a list",
+                route_name,
+            )
+            allowed_raw = list(_DEFAULT_GITHUB_ALLOWED_AUTHOR_ASSOCIATIONS)
+
+        allowed = {str(value).strip().upper() for value in allowed_raw if value}
+        if not allowed:
+            allowed = set(_DEFAULT_GITHUB_ALLOWED_AUTHOR_ASSOCIATIONS)
+
+        normalized_association = association.upper()
+        username = str(actor.get("login", "")).strip() if isinstance(actor, dict) else ""
+        actor_mention = f"@{username}" if username else "You"
+
+        if normalized_association not in allowed:
+            allowed_label = ", ".join(sorted(allowed))
+            denied_message = middleware.get("denied_message", "").strip()
+            if denied_message:
+                denied_message = self._render_prompt(
+                    denied_message, payload, event_type, route_name
+                )
+            else:
+                denied_message = (
+                    f"{actor_mention} Sorry, this webhook only accepts "
+                    f"author_association values: {allowed_label}."
+                )
+
+            self._post_github_issue_comment(repo, issue_number, denied_message)
+            logger.info(
+                "[webhook] denied route=%s event=%s association=%s delivery=%s",
+                route_name,
+                event_type,
+                normalized_association or "(missing)",
+                delivery_id,
+            )
+            return web.json_response(
+                {
+                    "status": "ignored",
+                    "route": route_name,
+                    "event": event_type,
+                    "delivery_id": delivery_id,
+                    "reason": "author_association_not_allowed",
+                    "author_association": association,
+                },
+                status=200,
+            )
+
+        self._add_github_eyes_reaction(repo, issue_number, comment_id)
+        return None
 
     # ------------------------------------------------------------------
     # Signature validation
@@ -758,6 +889,100 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[webhook] github_comment delivery error: %s", e)
             return SendResult(success=False, error=str(e))
+
+    def _post_github_issue_comment(
+        self,
+        repo: str,
+        issue_number: str,
+        content: str,
+    ) -> bool:
+        """Post a GitHub issue comment via ``gh`` CLI.
+
+        Args:
+            repo: GitHub repository in ``owner/name`` format.
+            issue_number: Issue number to comment on.
+            content: Comment body to post.
+
+        Returns:
+            True when comment posting succeeded; otherwise False.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "issue",
+                    "comment",
+                    str(issue_number),
+                    "--repo",
+                    repo,
+                    "--body",
+                    content,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return True
+            logger.warning(
+                "[webhook] gh issue comment failed: %s",
+                result.stderr,
+            )
+            return False
+        except FileNotFoundError:
+            logger.warning("[webhook] 'gh' CLI not found for issue comment middleware")
+            return False
+        except Exception as e:
+            logger.warning("[webhook] github issue comment middleware error: %s", e)
+            return False
+
+    def _add_github_eyes_reaction(
+        self,
+        repo: str,
+        issue_number: str,
+        comment_id: str = "",
+    ) -> bool:
+        """Add an :eyes: reaction using GitHub's reactions API via ``gh api``.
+
+        Args:
+            repo: GitHub repository in ``owner/name`` format.
+            issue_number: Issue number associated with the event.
+            comment_id: Comment ID for issue_comment events; if empty, reacts to
+                the issue itself.
+
+        Returns:
+            True when reaction creation succeeded; otherwise False.
+        """
+        endpoint = f"/repos/{repo}/issues/{issue_number}/reactions"
+        if comment_id:
+            endpoint = f"/repos/{repo}/issues/comments/{comment_id}/reactions"
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "POST",
+                    endpoint,
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                    "-f",
+                    "content=eyes",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return True
+            logger.warning("[webhook] gh api reaction failed: %s", result.stderr)
+            return False
+        except FileNotFoundError:
+            logger.warning("[webhook] 'gh' CLI not found for reaction middleware")
+            return False
+        except Exception as e:
+            logger.warning("[webhook] github reaction middleware error: %s", e)
+            return False
 
     async def _deliver_cross_platform(
         self, platform_name: str, content: str, delivery: dict
