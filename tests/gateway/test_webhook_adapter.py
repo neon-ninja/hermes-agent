@@ -387,6 +387,437 @@ class TestHTTPHandling:
 
 
 # ===================================================================
+# GitHub author_association middleware
+# ===================================================================
+
+
+class TestGithubAuthorAssociationMiddleware:
+    @pytest.mark.asyncio
+    async def test_allowed_issue_comment_adds_eyes_reaction(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["issue_comment"],
+                "prompt": "Reply to {comment.body}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "created",
+                        "repository": {"full_name": "org/repo"},
+                        "issue": {"number": 42},
+                        "comment": {
+                            "id": 123456,
+                            "body": "please summarize",
+                            "author_association": "MEMBER",
+                            "user": {"login": "trusted-user"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "issue_comment",
+                        "X-GitHub-Delivery": "assoc-allowed-001",
+                    },
+                )
+                assert resp.status == 202
+                data = await resp.json()
+                assert data["status"] == "accepted"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_awaited_once()
+            mock_run.assert_called_once_with(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "POST",
+                    "/repos/org/repo/issues/comments/123456/reactions",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                    "-f",
+                    "content=eyes",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+    @pytest.mark.asyncio
+    async def test_denied_issue_comment_posts_reply_and_skips_agent(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["issue_comment"],
+                "prompt": "Reply to {comment.body}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "created",
+                        "repository": {"full_name": "org/repo"},
+                        "issue": {"number": 42},
+                        "comment": {
+                            "id": 123456,
+                            "body": "please summarize",
+                            "author_association": "NONE",
+                            "user": {"login": "outside-user"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "issue_comment",
+                        "X-GitHub-Delivery": "assoc-denied-001",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "ignored"
+                assert data["reason"] == "author_association_not_allowed"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_not_awaited()
+            args, kwargs = mock_run.call_args
+            assert args[0][:4] == ["gh", "issue", "comment", "42"]
+            assert "--repo" in args[0]
+            assert "org/repo" in args[0]
+            assert "--body" in args[0]
+            body = args[0][args[0].index("--body") + 1]
+            assert "@outside-user" in body
+            assert kwargs["capture_output"] is True
+            assert kwargs["text"] is True
+            assert kwargs["timeout"] == 30
+
+    @pytest.mark.asyncio
+    async def test_allowed_list_is_configurable(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["issues"],
+                "prompt": "Issue: {issue.title}",
+                "github_author_association": {
+                    "allowed": ["NONE"],
+                },
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "opened",
+                        "repository": {"full_name": "org/repo"},
+                        "issue": {
+                            "number": 7,
+                            "title": "help",
+                            "author_association": "NONE",
+                            "user": {"login": "first-timer"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "issues",
+                        "X-GitHub-Delivery": "assoc-allowed-002",
+                    },
+                )
+                assert resp.status == 202
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_awaited_once()
+            args, _ = mock_run.call_args
+            assert "/repos/org/repo/issues/7/reactions" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_allowed_pull_request_adds_eyes_reaction(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request"],
+                "prompt": "Review PR {pull_request.title}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "opened",
+                        "number": 88,
+                        "repository": {"full_name": "org/repo"},
+                        "pull_request": {
+                            "title": "Add feature",
+                            "author_association": "COLLABORATOR",
+                            "user": {"login": "pr-author"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "assoc-pr-allowed-001",
+                    },
+                )
+                assert resp.status == 202
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_awaited_once()
+            args, _ = mock_run.call_args
+            assert "/repos/org/repo/issues/88/reactions" in args[0]
+            assert "content=eyes" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_denied_pull_request_posts_reply_and_skips_agent(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request"],
+                "prompt": "Review PR {pull_request.title}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "opened",
+                        "number": 88,
+                        "repository": {"full_name": "org/repo"},
+                        "pull_request": {
+                            "title": "Add feature",
+                            "author_association": "NONE",
+                            "user": {"login": "outside-user"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "assoc-pr-denied-001",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "ignored"
+                assert data["reason"] == "author_association_not_allowed"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_not_awaited()
+            args, _ = mock_run.call_args
+            assert args[0][:4] == ["gh", "issue", "comment", "88"]
+            body = args[0][args[0].index("--body") + 1]
+            assert "@outside-user" in body
+
+    @pytest.mark.asyncio
+    async def test_missing_repo_or_issue_number_fails_closed(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request"],
+                "prompt": "Review PR {pull_request.title}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        with patch("gateway.platforms.webhook.subprocess.run") as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "opened",
+                        "repository": {"full_name": "org/repo"},
+                        "pull_request": {
+                            "title": "Add feature",
+                            "author_association": "NONE",
+                            "user": {"login": "outside-user"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "assoc-pr-missing-context-001",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "ignored"
+                assert data["reason"] == "github_author_association_context_missing"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_not_awaited()
+            mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_string_denied_message_does_not_crash(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["issue_comment"],
+                "prompt": "Reply to {comment.body}",
+                "github_author_association": {"denied_message": None},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "created",
+                        "repository": {"full_name": "org/repo"},
+                        "issue": {"number": 42},
+                        "comment": {
+                            "id": 123456,
+                            "body": "please summarize",
+                            "author_association": "NONE",
+                            "user": {"login": "outside-user"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "issue_comment",
+                        "X-GitHub-Delivery": "assoc-denied-nonstr-msg-001",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "ignored"
+                assert data["reason"] == "author_association_not_allowed"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_not_awaited()
+            args, _ = mock_run.call_args
+            assert args[0][:4] == ["gh", "issue", "comment", "42"]
+
+    @pytest.mark.asyncio
+    async def test_non_dict_comment_payload_does_not_crash(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["issue_comment"],
+                "prompt": "Reply to {comment.body}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "created",
+                        "repository": {"full_name": "org/repo"},
+                        "issue": {"number": 42},
+                        "comment": "bad-shape",
+                    },
+                    headers={
+                        "X-GitHub-Event": "issue_comment",
+                        "X-GitHub-Delivery": "assoc-bad-comment-shape-001",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "ignored"
+                assert data["reason"] == "author_association_not_allowed"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_not_awaited()
+            mock_run.assert_called_once()
+
+
+# ===================================================================
 # Idempotency
 # ===================================================================
 
@@ -834,4 +1265,3 @@ class TestInsecureNoAuthSafetyRail:
             assert result is True
         finally:
             await adapter.disconnect()
-

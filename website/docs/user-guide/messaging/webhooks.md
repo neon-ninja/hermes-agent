@@ -82,6 +82,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `secret` | **Yes** | HMAC secret for signature validation. Falls back to the global `secret` if not set on the route. Set to `"INSECURE_NO_AUTH"` for testing only (skips validation). |
 | `prompt` | No | Template string with dot-notation payload access (e.g. `{pull_request.title}`). If omitted, the full JSON payload is dumped into the prompt. |
 | `skills` | No | List of skill names to load for the agent run. |
+| `github_author_association` | No | Optional GitHub-only middleware for `issues` / `issue_comment` / `pull_request` events. Gates LLM access by `author_association` to help mitigate prompt-injection and abuse risk from untrusted contributors. Supports `enabled` (default `true`), `allowed` (default `["OWNER","MEMBER","COLLABORATOR"]`), and `denied_message` (optional template used when access is denied). |
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
 | `deliver_only` | No | If `true`, skip the agent entirely — the rendered `prompt` template becomes the literal message that gets delivered. Zero LLM cost, sub-second delivery. See [Direct Delivery Mode](#direct-delivery-mode) for use cases. Requires `deliver` to be a real target (not `log`). |
@@ -112,6 +113,15 @@ platforms:
           deliver_extra:
             repo: "{repository.full_name}"
             pr_number: "{number}"
+        github-issue-bot:
+          events: ["issue_comment", "issues"]
+          secret: "github-webhook-secret"
+          prompt: "Handle this GitHub issue event:\n{__raw__}"
+          github_author_association:
+            enabled: true
+            allowed: ["OWNER", "MEMBER", "COLLABORATOR"]
+            denied_message: "Sorry, this bot is limited to maintainers and collaborators."
+          deliver: "log"
         deploy-notify:
           events: ["push"]
           secret: "deploy-secret"
