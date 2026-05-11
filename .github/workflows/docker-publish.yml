@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 # Concurrency: push/release runs are NEVER cancelled so every merge gets its
 # own SHA-tagged image; :latest is guarded separately by the move-latest job.
@@ -37,6 +38,7 @@ concurrency:
 
 env:
   IMAGE_NAME: nousresearch/hermes-agent
+  GHCR_IMAGE_NAME: ghcr.io/nousresearch/hermes-agent
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -231,6 +233,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # Compute the tag for this run.  Main pushes use sha-<sha> (so every
       # commit gets its own immutable tag); releases use the release tag name.
       - name: Compute tag
@@ -266,6 +275,16 @@ jobs:
           docker buildx imagetools inspect "${IMAGE_NAME}:${TAG}"
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          TAG: ${{ steps.tag.outputs.tag }}
+
+      - name: Copy manifest to GitHub Container Registry
+        run: |
+          docker buildx imagetools create \
+            --tag "${GHCR_IMAGE_NAME}:${TAG}" \
+            "${IMAGE_NAME}:${TAG}"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          GHCR_IMAGE_NAME: ${{ env.GHCR_IMAGE_NAME }}
           TAG: ${{ steps.tag.outputs.tag }}
 
       # Signal to move-latest that the SHA tag is live.  Only on main pushes;
@@ -320,6 +339,13 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Read the git revision label off the current :latest manifest, then
       # use `git merge-base --is-ancestor` to check whether our commit is a
@@ -402,3 +428,12 @@ jobs:
           docker buildx imagetools create \
             --tag "${image}:latest" \
             "${image}:sha-${GITHUB_SHA}"
+
+      - name: Copy :latest to GitHub Container Registry
+        if: steps.latest_check.outputs.push_latest == 'true'
+        run: |
+          set -euo pipefail
+          ghcr_image=ghcr.io/nousresearch/hermes-agent
+          docker buildx imagetools create \
+            --tag "${ghcr_image}:latest" \
+            "${ghcr_image}:sha-${GITHUB_SHA}"
