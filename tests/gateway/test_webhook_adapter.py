@@ -570,6 +570,110 @@ class TestGithubAuthorAssociationMiddleware:
             args, _ = mock_run.call_args
             assert "/repos/org/repo/issues/7/reactions" in args[0]
 
+    @pytest.mark.asyncio
+    async def test_allowed_pull_request_adds_eyes_reaction(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request"],
+                "prompt": "Review PR {pull_request.title}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "opened",
+                        "number": 88,
+                        "repository": {"full_name": "org/repo"},
+                        "pull_request": {
+                            "title": "Add feature",
+                            "author_association": "COLLABORATOR",
+                            "user": {"login": "pr-author"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "assoc-pr-allowed-001",
+                    },
+                )
+                assert resp.status == 202
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_awaited_once()
+            args, _ = mock_run.call_args
+            assert "/repos/org/repo/issues/88/reactions" in args[0]
+            assert "content=eyes" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_denied_pull_request_posts_reply_and_skips_agent(self):
+        routes = {
+            "gh": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request"],
+                "prompt": "Review PR {pull_request.title}",
+                "github_author_association": {},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        app = _create_app(adapter)
+        with patch(
+            "gateway.platforms.webhook.subprocess.run",
+            return_value=mock_result,
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/gh",
+                    json={
+                        "action": "opened",
+                        "number": 88,
+                        "repository": {"full_name": "org/repo"},
+                        "pull_request": {
+                            "title": "Add feature",
+                            "author_association": "NONE",
+                            "user": {"login": "outside-user"},
+                        },
+                    },
+                    headers={
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "assoc-pr-denied-001",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "ignored"
+                assert data["reason"] == "author_association_not_allowed"
+
+            await asyncio.sleep(0.05)
+
+            adapter.handle_message.assert_not_awaited()
+            args, _ = mock_run.call_args
+            assert args[0][:4] == ["gh", "issue", "comment", "88"]
+            body = args[0][args[0].index("--body") + 1]
+            assert "@outside-user" in body
+
 
 # ===================================================================
 # Idempotency

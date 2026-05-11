@@ -633,13 +633,16 @@ class WebhookAdapter(BasePlatformAdapter):
         if middleware.get("enabled", True) is False:
             return None
 
-        if event_type not in {"issues", "issue_comment"}:
+        if event_type not in {"issues", "issue_comment", "pull_request"}:
             return None
 
         repository = payload.get("repository", {})
         repo = str(repository.get("full_name", "")).strip()
         issue = payload.get("issue", {})
-        issue_number = str(issue.get("number", "")).strip()
+        issue_number_raw = issue.get("number")
+        if issue_number_raw is None:
+            issue_number_raw = payload.get("number", "")
+        issue_number = str(issue_number_raw).strip()
         if not repo or not issue_number:
             logger.warning(
                 "[webhook] github_author_association middleware missing repo/issue for route=%s",
@@ -658,6 +661,16 @@ class WebhookAdapter(BasePlatformAdapter):
         elif event_type == "issues":
             actor = issue.get("user", {}) if isinstance(issue, dict) else {}
             association = str(issue.get("author_association", "")).strip()
+        elif event_type == "pull_request":
+            pull_request = payload.get("pull_request", {})
+            actor = (
+                pull_request.get("user", {})
+                if isinstance(pull_request, dict)
+                else {}
+            )
+            association = str(
+                pull_request.get("author_association", "")
+            ).strip()
 
         allowed_raw = middleware.get(
             "allowed", list(_DEFAULT_GITHUB_ALLOWED_AUTHOR_ASSOCIATIONS)
