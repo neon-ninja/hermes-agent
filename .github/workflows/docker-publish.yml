@@ -37,8 +37,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  IMAGE_NAME: nousresearch/hermes-agent
-  GHCR_IMAGE_NAME: ghcr.io/nousresearch/hermes-agent
+  IMAGE_NAME: ${{ github.repository }}
+  GHCR_IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -388,7 +388,7 @@ jobs:
         id: latest_check
         run: |
           set -euo pipefail
-          image=ghcr.io/nousresearch/hermes-agent
+          image=ghcr.io/${{ github.repository }}
 
           # Pull the JSON for the linux/amd64 sub-manifest's config and extract
           # the OCI revision label with jq — Go template field access can't
