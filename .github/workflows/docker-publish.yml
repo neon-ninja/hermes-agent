@@ -238,8 +238,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check Docker Hub credentials
+        id: dh_creds
+        run: |
+          if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Log in to Docker Hub
-        if: secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        if: steps.dh_creds.outputs.available == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -284,7 +296,7 @@ jobs:
 
       # Mirror the GHCR manifest to Docker Hub when credentials are configured.
       - name: Mirror manifest to Docker Hub
-        if: secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        if: steps.dh_creds.outputs.available == 'true'
         run: |
           docker buildx imagetools create \
             --tag "${IMAGE_NAME}:${TAG}" \
@@ -348,8 +360,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check Docker Hub credentials
+        id: dh_creds
+        run: |
+          if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Log in to Docker Hub
-        if: secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        if: steps.dh_creds.outputs.available == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -440,7 +464,7 @@ jobs:
 
       # Mirror :latest to Docker Hub when credentials are configured.
       - name: Mirror Docker Hub :latest
-        if: steps.latest_check.outputs.push_latest == 'true' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        if: steps.latest_check.outputs.push_latest == 'true' && steps.dh_creds.outputs.available == 'true'
         run: |
           set -euo pipefail
           docker buildx imagetools create \
