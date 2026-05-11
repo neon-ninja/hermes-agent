@@ -433,7 +433,8 @@ jobs:
         if: steps.latest_check.outputs.push_latest == 'true'
         run: |
           set -euo pipefail
-          ghcr_image=ghcr.io/nousresearch/hermes-agent
           docker buildx imagetools create \
-            --tag "${ghcr_image}:latest" \
-            "${ghcr_image}:sha-${GITHUB_SHA}"
+            --tag "${GHCR_IMAGE_NAME}:latest" \
+            "${GHCR_IMAGE_NAME}:sha-${GITHUB_SHA}"
+        env:
+          GHCR_IMAGE_NAME: ${{ env.GHCR_IMAGE_NAME }}
